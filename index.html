@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+
+  <head>
+    <meta charset="utf-8">
+    <title>Timelapse Shooting Utility</title>
+
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="./bootstrap.min.css">
+    <script src="./jquery.min.js"></script>
+    <script src="./bootstrap.min.js"></script>
+    <script src="./bootstrap-input-spinner.js"></script>
+    <script type="text/javascript">
+        window.addEventListener('load', (event) => {
+          $("input[type='number']").inputSpinner();
+          request_stats_update_from_server();
+        });
+
+        // STORE TOTAL NUMBER OF SHOTS AND PARAMETERS
+        var total_shots = 0
+        var exposure_time = 0
+        var delay_time = 0
+
+        // STORE THE CURRENT VARIABLES THAT ARE BEING DISPLAYED
+        var shots_left = 0
+        var current_exposure = 0
+        var current_delay = 0
+
+        var timeout_function;
+
+        // ADD EVENT LISTENER TO UPDATE THE CURRENT EXPOSURE; DELAY AND SHOT NO.
+        if (!!window.EventSource) {
+          var source = new EventSource('/events');
+
+          source.addEventListener('update-progress', function(e) {
+
+            //parse the data from the json object
+            var retrieved = JSON.parse(e.data)
+
+            shots_left = total_shots - parseInt(retrieved.shot)
+            current_exposure = parseFloat(retrieved.exposure)
+            current_delay = parseFloat(retrieved.delay)
+
+          }, false);
+
+          // We are done shooting!
+          source.addEventListener('shooting-done', function(e) {
+
+            update_progress_bars(0, 0, 0, done_shooting=true)
+            clearTimeout(timeout_function)
+
+          }, false);
+
+
+        }
+
+        function shoot_single(){
+          var cl = new XMLHttpRequest();
+          cl.open("POST", "./shoot");
+          cl.send();
+        }
+
+        function syncronize_clock()
+         {
+           synctiming = $("[name='sync-timing']");
+           synctiming.html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span><span class="sr-only"> Syncronizing...</span>');
+           synctiming.attr("disabled", true);
+
+           timing_active_button = $("[name = 'timing_options']:checked")[0];
+           switch (timing_active_button.id) {
+             case "10sec":
+              syncronize_time = 10*1000
+              break;
+             case "30sec":
+              syncronize_time = 30*1000
+              break;
+             case "1min":
+              syncronize_time = 60*1000
+              break;
+             default:
+              syncronize_time = 10*1000
+
+           }
+
+           var first = new XMLHttpRequest();
+           var second = new XMLHttpRequest();
+           first.open("POST", "./sync-timing");
+           second.open("POST", "./sync-timing");
+
+           first.setRequestHeader("Initial", 1);
+           second.setRequestHeader("Final", 1);
+
+           var start_time = Date.now();
+           first.setRequestHeader("Sync-date", start_time);
+           first.send();
+
+           var drift = start_time - Date.now();
+           setTimeout(function(){
+             second.setRequestHeader("Sync-date", Date.now());
+             second.send();
+
+             synctiming.html("Syncronize!")
+             synctiming.attr("disabled", false)
+           }, syncronize_time-2*drift)
+
+         }
+
+        function shoot_pressed(){
+          exposure_form = $("input[name = 'exposure']").val();
+          delay_form = $("input[name = 'delay']").val()
+          number_shots_form = $("input[name = 'number-shots']").val()
+
+          shoot = new XMLHttpRequest()
+          shoot.open("GET", "./start-shooting")
+          shoot.setRequestHeader("exposure", exposure_form)
+          shoot.setRequestHeader("delay", delay_form)
+          shoot.setRequestHeader("number-shots", number_shots_form)
+          shoot.send()
+
+          $(".progress-card").slideDown(500);
+          $(".disable-on-shoot").attr("disabled", true)
+
+          total_shots = parseInt(number_shots_form)
+          exposure_time = parseFloat(exposure_form)
+          delay_time = parseFloat(delay_form)
+
+          shots_left = total_shots;
+          current_exposure = 0;
+          current_delay = 0;
+
+          start_stats_updating_loop()
+        }
+
+        function abort_pressed(){
+          $(".progress-card").slideUp(500);
+          $(".disable-on-shoot").attr("disabled", false)
+          clearTimeout(timeout_function)
+          $(".time-bar").css("width", "0%")
+          $(".time-bar").removeClass("bg-success").addClass("bg-primary")
+          $(".shots-bar").css("width", "0%")
+
+
+          //change button back
+          $(".abort-btn").html("Abort")
+          $(".abort-btn").removeClass("btn-primary").addClass("btn-danger")
+
+          //missing: need to send an abort message.
+          stop = new XMLHttpRequest()
+          stop.open("GET", "./stop-shooting")
+          stop.send()
+
+        }
+
+        function update_progress_bars(shot_number, current_exp_time, current_delay_time, done_shooting){
+            var shots_left = total_shots-shot_number
+            if (done_shooting){
+              // update progress bars
+              $(".time-bar").css("width","100%")
+              $(".time-bar").html("")
+              $(".time-bar").removeClass("bg-warning").addClass("bg-success")
+              $(".shots-bar").css("width","100%")
+              $(".shots-bar").html(total_shots.toString()+"/"+total_shots.toString())
+
+              // change the abort button to "Done"
+              $(".abort-btn").html("Done")
+              $(".abort-btn").removeClass("btn-danger").addClass("btn-primary")
+
+              return
+            }
+
+            // make sure that we have the right colors
+            $(".time-bar").removeClass("bg-success")
+            // change the "Done" button back to "Abort"
+            $(".abort-btn").html("Abort")
+            $(".abort-btn").removeClass("btn-primary").addClass("btn-danger")
+
+
+            if (shots_left <= 0){
+              // we are done shooting. Update the progress bars to 100%
+              $(".time-bar").css("width","100%")
+              $(".time-bar").html("")
+              $(".time-bar").removeClass("bg-warning").addClass("bg-success")
+              $(".shots-bar").css("width","100%")
+              $(".shots-bar").html(total_shots.toString()+"/"+total_shots.toString())
+
+              // change the abort button to "Done"
+              $(".abort-btn").html("Done")
+              $(".abort-btn").removeClass("btn-danger").addClass("btn-primary")
+
+              return
+            }
+
+            //subdivide the progress bars in chunks of 1 second (or 1/2s for the last chunk)
+            var exposure_segments = Math.ceil(exposure_time)
+            var delay_segments = Math.ceil(delay_time)
+
+            var exposure_bar_percentage = Math.ceil(current_exp_time)/exposure_segments
+            var delay_bar_percentage = Math.ceil(current_delay_time)/delay_segments
+
+            // Find out what number of seconds to print on the progress bar.
+            // approximate to closest half second.
+            var exposure_current_time = Math.floor(current_exp_time*2)/2
+            var delay_current_time = Math.floor(current_delay_time*2)/2
+
+            if (delay_bar_percentage > 0){
+              // show the bar as yellow, and update the percentage.
+              $(".time-bar").removeClass("bg-primary").removeClass("bg-success").addClass("bg-warning")
+              //updaate the text and width of the bar.
+              $(".time-bar").css("width", Math.floor(100*delay_bar_percentage).toString()+"%")
+              $(".time-bar").html(delay_current_time.toString()+"s")
+
+            } else {
+              // show the bar as blue, and update the percentage.
+              $(".time-bar").removeClass("bg-warning").removeClass("bg-success").addClass("bg-primary")
+              //updaate the text and width of the bar.
+              $(".time-bar").css("width", Math.floor(100*exposure_bar_percentage).toString()+"%")
+              $(".time-bar").html(exposure_current_time.toString()+"s")
+            }
+
+            // update the text and width of the bar.
+            $(".shots-bar").css("width", Math.floor(100*(total_shots - shots_left+1)/total_shots).toString()+"%")
+            $(".shots-bar").html(shot_number.toString()+"/"+total_shots.toString())
+
+        }
+
+        function millis_to_next_progress_update(){
+          if (exposure_time-current_exposure >= 1){
+            return 1000
+          }
+          if (exposure_time-current_exposure > 0){
+            return parseInt((exposure_time-current_exposure)*1000)
+          }
+          if (delay_time-current_delay >=1) {
+            return 1000
+          }
+          if (delay_time-current_delay > 0) {
+            return parseInt((delay_time-current_delay)*1000)
+          }
+          return 1000
+        }
+
+        function start_stats_updating_loop(){
+          var delta_t = millis_to_next_progress_update()
+          var t_expected = Date.now() + delta_t;
+
+          // Start the recursive function call
+          timeout_function = setTimeout(step, delta_t);
+
+          function step() {
+              //update current_exposure and current_delay for the next round
+              if (current_exposure < exposure_time){
+                current_exposure = Math.min(current_exposure + 1, exposure_time);
+              } else
+              if (current_delay < delay_time){
+                current_delay = current_delay + 1
+                if (current_delay >= delay_time) {
+                  current_exposure = 0
+                  current_delay = 0
+
+                  shots_left -= 1
+                }
+              }
+
+              //check that there are still pictures to be taken
+              if (shots_left >= 0){
+                update_progress_bars(total_shots-shots_left+1, current_exposure, current_delay, false) // +1 to account for the first shot being number 0
+                var drift = Date.now() - t_expected; // the drift (positive for overshooting)
+
+              delta_t = millis_to_next_progress_update()
+              t_expected += delta_t
+              timeout_function = setTimeout(step, Math.max(0, delta_t - drift)); // take into account drift
+            } else {
+              update_progress_bars(0,0,0,false)
+            }
+          }
+        }
+
+        function stop_stats_updating_loop(){
+          clearTimeout(timeout_function)
+        }
+
+        function request_stats_update_from_server(){
+          var cl = new XMLHttpRequest();
+          cl.open("POST", "./status");
+          cl.send();
+        }
+
+    </script>
+  </head>
+
+  <body>
+    <div class="container">
+
+    <!-- TITLE JUMBOTRON -->
+    <div class="jumbotron jumbotron-fluid">
+      <div class="container">
+        <h1 class="display-4">Intervalometer D3400</h1>
+        <p class="lead">Basic tool for setting up interval shooting on a Nikon D3400.</p>
+      </div>
+    </div>
+
+
+    <!-- SETTINGS SELECTION -->
+    <div class="card settings-card">
+      <div class="card-body">
+        <p class="card-text">Camera settings</p>
+        <form class="fm" action="./" method="get">
+          <div class="form-group row">
+            <div class="col-sm-6">
+              Exposure (seconds):
+            </div>
+            <div class="col-sm-6">
+              <input name = "exposure" type="number" value="15" min="1" max="10000" step="0.5" data-decimals="1"/>
+            </div>
+          </div>
+          <div class="form-group row">
+            <div class="col-sm-6">
+              Delay (seconds):
+            </div>
+            <div class="form-group col-sm-6">
+              <input name= "delay" type="number" value="3" min="1" max="10000" step="0.5" data-decimals="1"/>
+            </div>
+          </div>
+        <div class="form-group row">
+          <div class="col-sm-6">
+            Number of shots:
+          </div>
+          <div class="col-sm-6">
+            <input name = "number-shots" type="number" value="20" min="1" max="1000" step="1"/>
+          </div>
+        </div>
+      </div>
+        <div class="form-group text-center">
+          <button type="button" class="btn btn-primary shoot-btn disable-on-shoot" onclick="shoot_pressed()">Shoot!</button>
+        </div>
+        <p></p>
+      </form>
+    </div>
+
+    <!--///PROGRESS BARS - Only show when "start" has been pressed-->
+    <div class="card text-center progress-card" style="display:none">
+      <div class="card-body">
+        <p class="card-text">Progress</p>
+        <div class="row">
+          <div class="col-sm-2">
+            <p>Combined:</p>
+          </div>
+          <div class="col-sm-10">
+            <div class="progress">
+              <div class="progress-bar bg-success shots-bar" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="col-sm-2">
+            <p>Current</p>
+          </div>
+          <div class="col-sm-10">
+            <div class="progress">
+              <div class="progress-bar time-bar bg-primary" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+            </div>
+          </div>
+        </div>
+      <p></p>
+      <button type="button" name="button" class="btn btn-danger abort-btn" onclick="abort_pressed()">Abort</button>
+    </div>
+    </div>
+  </div>
+
+    <div class="container">
+      <div class="row">
+              <h2 class="text-primary ">Extra</h2>
+      </div>
+
+
+      <!--  CARD - CLOCK SYNC  -->
+      <div class="row">
+        <div class="col-sm-12 col-md-6 col-lg-4">
+
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title font-weight-bold">Syncronize progress</h5>
+              <p class="card-text">If your device lost connection to the wifi, the displayed time might not be accurate. Press here to retrieve current status from intervalometer. Notice: might cause slight delay if pressed at the wrong time.</p>
+
+              <button type="button" class="btn btn-primary single-shot-btn" name="button" onclick="request_stats_update_from_server()">Sync</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-sm-12 col-md-6 col-lg-4">
+
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title font-weight-bold">Single shot</h5>
+              <p class="card-text">This does what you might think. In bulb mode, you need to shoot twice!</p>
+
+              <button type="button" class="btn btn-primary single-shot-btn disable-on-shoot" name="button" onclick="shoot_single()">Shoot</button>
+            </div>
+          </div>
+        </div>
+        <div class="col-sm-12 col-md-6 col-lg-4">
+
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title font-weight-bold">Clock synchronization [WIP]</h5>
+              <p class="card-text">Synchronize the internal timer of the intervalometer with this device. The internal clock of the intervalometer is not very accurate, and this might improve timing precision.</p>
+              <div class="btn-group btn-group-toggle" data-toggle="buttons">
+                <label class="btn btn-primary active">
+                  <input type="radio" name="timing_options" id="10sec" autocomplete="off" checked> 10 s
+                </label>
+                <label class="btn btn-primary">
+                  <input type="radio" name="timing_options" id="30sec" autocomplete="off"> 30 s
+                </label>
+                <label class="btn btn-primary">
+                  <input type="radio" name="timing_options" id="1min" autocomplete="off"> 1 m
+                </label>
+              </div>
+              <p></p>
+              <button type="button" name="sync-timing" class="btn btn-primary disable-on-shoot" onclick="syncronize_clock()">Syncronize clock</button>
+            </div>
+          </div>
+        </div>
+
+    </div>
+
+
+    </div>
+  </body>
+
+</html>
